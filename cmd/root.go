@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/spf13/cobra"
+
 	"github.com/axllent/mailpit/config"
 	"github.com/axllent/mailpit/internal/auth"
 	"github.com/axllent/mailpit/internal/logger"
@@ -16,7 +18,6 @@ import (
 	"github.com/axllent/mailpit/internal/tools"
 	"github.com/axllent/mailpit/server"
 	"github.com/axllent/mailpit/server/webhook"
-	"github.com/spf13/cobra"
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -126,6 +127,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&config.SMTPStrictRFCHeaders, "smtp-strict-rfc-headers", config.SMTPStrictRFCHeaders, "Return SMTP error if message headers contain <CR><CR><LF>")
 	rootCmd.Flags().IntVar(&config.SMTPMaxRecipients, "smtp-max-recipients", config.SMTPMaxRecipients, "Maximum SMTP recipients allowed")
 	rootCmd.Flags().StringVar(&config.SMTPAllowedRecipients, "smtp-allowed-recipients", config.SMTPAllowedRecipients, "Only allow SMTP recipients matching a regular expression (default allow all)")
+	rootCmd.Flags().BoolVar(&config.SMTPIgnoreRejectedRecipients, "smtp-ignore-rejected-recipients", config.SMTPIgnoreRejectedRecipients, "Ignore rejected SMTP recipients with 2xx response")
 	rootCmd.Flags().BoolVar(&smtpd.DisableReverseDNS, "smtp-disable-rdns", smtpd.DisableReverseDNS, "Disable SMTP reverse DNS lookups")
 
 	// SMTP relay
@@ -301,6 +303,9 @@ func initConfigFromEnv() {
 	if len(os.Getenv("MP_SMTP_ALLOWED_RECIPIENTS")) > 0 {
 		config.SMTPAllowedRecipients = os.Getenv("MP_SMTP_ALLOWED_RECIPIENTS")
 	}
+	if getEnabledFromEnv("MP_SMTP_IGNORE_REJECTED_RECIPIENTS") {
+		config.SMTPIgnoreRejectedRecipients = true
+	}
 	if getEnabledFromEnv("MP_SMTP_DISABLE_RDNS") {
 		smtpd.DisableReverseDNS = true
 	}
@@ -328,6 +333,7 @@ func initConfigFromEnv() {
 	config.SMTPRelayConfig.AllowedRecipients = os.Getenv("MP_SMTP_RELAY_ALLOWED_RECIPIENTS")
 	config.SMTPRelayConfig.BlockedRecipients = os.Getenv("MP_SMTP_RELAY_BLOCKED_RECIPIENTS")
 	config.SMTPRelayConfig.PreserveMessageIDs = getEnabledFromEnv("MP_SMTP_RELAY_PRESERVE_MESSAGE_IDS")
+	config.SMTPRelayConfig.ForwardSMTPErrors = getEnabledFromEnv("MP_SMTP_RELAY_FWD_SMTP_ERRORS")
 
 	// SMTP forwarding
 	config.SMTPForwardConfigFile = os.Getenv("MP_SMTP_FORWARD_CONFIG")
@@ -346,6 +352,7 @@ func initConfigFromEnv() {
 	config.SMTPForwardConfig.ReturnPath = os.Getenv("MP_SMTP_FORWARD_RETURN_PATH")
 	config.SMTPForwardConfig.OverrideFrom = os.Getenv("MP_SMTP_FORWARD_OVERRIDE_FROM")
 	config.SMTPForwardConfig.To = os.Getenv("MP_SMTP_FORWARD_TO")
+	config.SMTPForwardConfig.ForwardSMTPErrors = getEnabledFromEnv("MP_SMTP_FORWARD_FWD_SMTP_ERRORS")
 
 	// Chaos
 	chaos.Enabled = getEnabledFromEnv("MP_ENABLE_CHAOS")

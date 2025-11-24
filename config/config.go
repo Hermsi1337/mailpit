@@ -12,9 +12,11 @@ import (
 	"strings"
 
 	"github.com/axllent/ghru/v2"
+
 	"github.com/axllent/mailpit/internal/auth"
 	"github.com/axllent/mailpit/internal/logger"
 	"github.com/axllent/mailpit/internal/smtpd/chaos"
+	"github.com/axllent/mailpit/internal/snakeoil"
 	"github.com/axllent/mailpit/internal/spamassassin"
 	"github.com/axllent/mailpit/internal/tools"
 )
@@ -180,6 +182,9 @@ var (
 	// SMTPAllowedRecipientsRegexp is the compiled version of SMTPAllowedRecipients
 	SMTPAllowedRecipientsRegexp *regexp.Regexp
 
+	// SMTPIgnoreRejectedRecipients if true, will accept emails to rejected recipients with 2xx response but silently drop them
+	SMTPIgnoreRejectedRecipients bool
+
 	// POP3Listen address - if set then Mailpit will start the POP3 server and listen on this address
 	POP3Listen = "[::]:1110"
 
@@ -248,6 +253,7 @@ type SMTPRelayConfigStruct struct {
 	BlockedRecipients       string         `yaml:"blocked-recipients"` // regex, if set prevents relating to these addresses
 	BlockedRecipientsRegexp *regexp.Regexp // compiled regexp using BlockedRecipients
 	PreserveMessageIDs      bool           `yaml:"preserve-message-ids"` // preserve the original Message-ID when relaying
+	ForwardSMTPErrors       bool           `yaml:"forward-smtp-errors"`  // whether to log smtp-errors or forward them to upstream-client
 
 	// DEPRECATED 2024/03/12
 	RecipientAllowlist string `yaml:"recipient-allowlist"`
@@ -255,18 +261,19 @@ type SMTPRelayConfigStruct struct {
 
 // SMTPForwardConfigStruct struct for parsing yaml & storing variables
 type SMTPForwardConfigStruct struct {
-	To            string `yaml:"to"`             // comma-separated list of email addresses
-	Host          string `yaml:"host"`           // SMTP host
-	Port          int    `yaml:"port"`           // SMTP port
-	STARTTLS      bool   `yaml:"starttls"`       // whether to use STARTTLS
-	TLS           bool   `yaml:"tls"`            // whether to use TLS
-	AllowInsecure bool   `yaml:"allow-insecure"` // allow insecure authentication, ignore TLS validation
-	Auth          string `yaml:"auth"`           // none, plain, login, cram-md5
-	Username      string `yaml:"username"`       // plain & cram-md5
-	Password      string `yaml:"password"`       // plain
-	Secret        string `yaml:"secret"`         // cram-md5
-	ReturnPath    string `yaml:"return-path"`    // allow overriding the bounce address
-	OverrideFrom  string `yaml:"override-from"`  // allow overriding of the from address
+	To                string `yaml:"to"`                  // comma-separated list of email addresses
+	Host              string `yaml:"host"`                // SMTP host
+	Port              int    `yaml:"port"`                // SMTP port
+	STARTTLS          bool   `yaml:"starttls"`            // whether to use STARTTLS
+	TLS               bool   `yaml:"tls"`                 // whether to use TLS
+	AllowInsecure     bool   `yaml:"allow-insecure"`      // allow insecure authentication, ignore TLS validation
+	Auth              string `yaml:"auth"`                // none, plain, login, cram-md5
+	Username          string `yaml:"username"`            // plain & cram-md5
+	Password          string `yaml:"password"`            // plain
+	Secret            string `yaml:"secret"`              // cram-md5
+	ReturnPath        string `yaml:"return-path"`         // allow overriding the bounce address
+	OverrideFrom      string `yaml:"override-from"`       // allow overriding of the from address
+	ForwardSMTPErrors bool   `yaml:"forward-smtp-errors"` // whether to log smtp-errors or forward them to upstream-client
 }
 
 // VerifyConfig wil do some basic checking
@@ -279,7 +286,8 @@ func VerifyConfig() error {
 	// The default Content Security Policy is updates on every application page load to replace script-src 'self'
 	// with a random nonce ID to prevent XSS. This applies to the Mailpit app & API.
 	// See server.middleWareFunc()
-	ContentSecurityPolicy = fmt.Sprintf("default-src 'self'; script-src 'self'; style-src %s 'unsafe-inline'; frame-src 'self'; img-src * data: blob:; font-src %s data:; media-src 'self'; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self';",
+	ContentSecurityPolicy = fmt.Sprintf(
+		"default-src 'self'; script-src 'self'; style-src %s 'unsafe-inline'; frame-src 'self'; img-src * data: blob:; font-src %s data:; media-src 'self'; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self';",
 		cssFontRestriction, cssFontRestriction,
 	)
 
@@ -333,8 +341,19 @@ func VerifyConfig() error {
 	}
 
 	if UITLSCert != "" {
-		UITLSCert = filepath.Clean(UITLSCert)
-		UITLSKey = filepath.Clean(UITLSKey)
+		if strings.HasPrefix(UITLSCert, "sans:") {
+			// generate a self-signed certificate
+			UITLSCert = snakeoil.Public(UITLSCert)
+		} else {
+			UITLSCert = filepath.Clean(UITLSCert)
+		}
+
+		if strings.HasPrefix(UITLSKey, "sans:") {
+			// generate a self-signed key
+			UITLSKey = snakeoil.Private(UITLSKey)
+		} else {
+			UITLSKey = filepath.Clean(UITLSKey)
+		}
 
 		if !isFile(UITLSCert) {
 			return fmt.Errorf("[ui] TLS certificate not found or readable: %s", UITLSCert)
@@ -393,8 +412,19 @@ func VerifyConfig() error {
 	}
 
 	if SMTPTLSCert != "" {
-		SMTPTLSCert = filepath.Clean(SMTPTLSCert)
-		SMTPTLSKey = filepath.Clean(SMTPTLSKey)
+		if strings.HasPrefix(SMTPTLSCert, "sans:") {
+			// generate a self-signed certificate
+			SMTPTLSCert = snakeoil.Public(SMTPTLSCert)
+		} else {
+			SMTPTLSCert = filepath.Clean(SMTPTLSCert)
+		}
+
+		if strings.HasPrefix(SMTPTLSKey, "sans:") {
+			// generate a self-signed key
+			SMTPTLSKey = snakeoil.Private(SMTPTLSKey)
+		} else {
+			SMTPTLSKey = filepath.Clean(SMTPTLSKey)
+		}
 
 		if !isFile(SMTPTLSCert) {
 			return fmt.Errorf("[smtp] TLS certificate not found or readable: %s", SMTPTLSCert)
@@ -462,8 +492,18 @@ func VerifyConfig() error {
 
 	// POP3 server
 	if POP3TLSCert != "" {
-		POP3TLSCert = filepath.Clean(POP3TLSCert)
-		POP3TLSKey = filepath.Clean(POP3TLSKey)
+		if strings.HasPrefix(POP3TLSCert, "sans:") {
+			// generate a self-signed certificate
+			POP3TLSCert = snakeoil.Public(POP3TLSCert)
+		} else {
+			POP3TLSCert = filepath.Clean(POP3TLSCert)
+		}
+		if strings.HasPrefix(POP3TLSKey, "sans:") {
+			// generate a self-signed key
+			POP3TLSKey = snakeoil.Private(POP3TLSKey)
+		} else {
+			POP3TLSKey = filepath.Clean(POP3TLSKey)
+		}
 
 		if !isFile(POP3TLSCert) {
 			return fmt.Errorf("[pop3] TLS certificate not found or readable: %s", POP3TLSCert)
@@ -548,6 +588,14 @@ func VerifyConfig() error {
 		logger.Log().Infof("[smtp] only allowing recipients matching regexp: %s", SMTPAllowedRecipients)
 	}
 
+	if SMTPIgnoreRejectedRecipients {
+		if SMTPAllowedRecipientsRegexp == nil {
+			logger.Log().Warn("[smtp] ignoring rejected recipients has no effect without setting smtp-allowed-recipients")
+		} else {
+			logger.Log().Info("[smtp] ignoring rejected recipients")
+		}
+	}
+
 	if err := parseRelayConfig(SMTPRelayConfigFile); err != nil {
 		return err
 	}
@@ -571,8 +619,10 @@ func VerifyConfig() error {
 			}
 
 			SMTPRelayMatchingRegexp = re
-			logger.Log().Infof("[relay] auto-relaying new messages to recipients matching \"%s\" via %s:%d",
-				SMTPRelayMatching, SMTPRelayConfig.Host, SMTPRelayConfig.Port)
+			logger.Log().Infof(
+				"[relay] auto-relaying new messages to recipients matching \"%s\" via %s:%d",
+				SMTPRelayMatching, SMTPRelayConfig.Host, SMTPRelayConfig.Port,
+			)
 		}
 	}
 
